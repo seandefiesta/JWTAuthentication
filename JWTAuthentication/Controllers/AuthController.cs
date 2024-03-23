@@ -1,13 +1,12 @@
 ﻿using JWTAuthentication.Models;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.Extensions.Configuration;
-using System.Data;
+using Microsoft.AspNetCore.Authorization;
+using JWTAuthentication.Services;
 
 namespace JWTAuthentication.Controllers
 {
@@ -18,14 +17,19 @@ namespace JWTAuthentication.Controllers
         public static User user = new User();
 
         private readonly IConfiguration _configuration;
+        private readonly IUserService _userService;
 
-        public AuthController(IConfiguration configuration)
+        public AuthController(IConfiguration configuration,IUserService userService)
         {
             _configuration = configuration;
+            _userService = userService;
         }
 
-
-
+        [HttpGet, Authorize]
+        public ActionResult<string> GetClaims()
+        {
+            return Ok(_userService.GetClaims());
+        }
 
         [HttpPost("register")]
         public ActionResult<User> Register(UserResponseDto req)
@@ -111,7 +115,9 @@ namespace JWTAuthentication.Controllers
         {
             List<Claim> claims = new List<Claim>
             {
-                new Claim(ClaimTypes.Name, user.Username)
+                new Claim(ClaimTypes.Name, user.Username),
+                new Claim(ClaimTypes.Role, "Admin"),
+                new Claim(ClaimTypes.NameIdentifier, "CCMSIdent : 4869623")
             };
 
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration.GetSection("AppSettings:Token").Value!));
@@ -120,7 +126,7 @@ namespace JWTAuthentication.Controllers
 
             var token = new JwtSecurityToken(
                     claims: claims,
-                    expires: DateTime.UtcNow.AddMinutes(5),
+                    expires: DateTime.UtcNow.AddMinutes(1),
                     signingCredentials: creds
                 );
 

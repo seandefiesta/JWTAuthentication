@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using JWTAuthentication.Services;
+using JWTAuthentication.Repository;
 
 namespace JWTAuthentication.Controllers
 {
@@ -18,35 +19,44 @@ namespace JWTAuthentication.Controllers
 
         private readonly IConfiguration _configuration;
         private readonly IUserService _userService;
+        private readonly IRefreshTokenRepository _refreshTokenRepository;
 
-        public AuthController(IConfiguration configuration,IUserService userService)
+        public AuthController(IConfiguration configuration, IUserService userService, IRefreshTokenRepository refreshTokenRepository)
         {
             _configuration = configuration;
             _userService = userService;
+            _refreshTokenRepository = refreshTokenRepository;
         }
 
-        [HttpGet, Authorize]
+        [HttpGet, Authorize(Roles = "Admin")]
         public ActionResult<string> GetClaims()
         {
             return Ok(_userService.GetClaims());
         }
 
         [HttpPost("register")]
-        public ActionResult<User> Register(UserResponseDto req)
+        public async Task<ActionResult<User>> Register(UserResponseDto req)
         {
-            string passwordHash
-                = BCrypt.Net.BCrypt.HashPassword(req.Password);
+            string passwordHash = BCrypt.Net.BCrypt.HashPassword(req.Password);
 
-            user.Username = req.Username;
-            user.PasswordHash = passwordHash;
+            var user = new User
+            {
+                Username = req.Username,
+                PasswordHash = passwordHash
+            };
 
-            return Ok(user);
+            await _userService.RegisterAsync(user);
+            string token = CreateToken(user);
+
+            return Ok(token);
         }
 
         [HttpPost("login")]
-        public ActionResult<User> Login(UserResponseDto req)
+        public async Task<ActionResult<User>> Login(UserResponseDto req)
         {
-            if (user.Username != req.Username)
+            var user = await _userService.GetUserByUsernameAsync(req.Username);
+
+            if (user == null)
             {
                 return BadRequest("Wrong username");
             }
@@ -56,33 +66,33 @@ namespace JWTAuthentication.Controllers
                 return BadRequest("Wrong password");
             }
 
-            string token = CreateToken(user);
-
             var refreshToken = GenerateRefreshToken();
-            SetRefreshToken(refreshToken);
+            await _refreshTokenRepository.AddAsync(refreshToken);
 
+            string token = CreateToken(user);
 
             return Ok(token);
         }
 
         [HttpPost("refresh-token")]
-        public async Task<ActionResult<string>> RefreshToken()
+        public async Task<ActionResult<string>> RefreshToken([FromBody] RefreshTokenRequestDto request)
         {
-            var refreshToken = Request.Cookies["refreshToken"];
-            if (!user.RefreshToken.Equals(refreshToken))
+            var refreshToken = request.RefreshToken;
+
+            var storedRefreshToken = await _refreshTokenRepository.GetByTokenAsync(refreshToken);
+            if (storedRefreshToken == null || storedRefreshToken.Expires < DateTime.UtcNow)
             {
-                return Unauthorized("Invalid Refresh Token");
-            }
-            else if (user.TokenExpires < DateTime.Now)
-            {
-                return Unauthorized("Token expired");
+                return Unauthorized("Invalid or expired refresh token");
             }
 
-            string token = CreateToken(user);
-            var newRefreshToken = GenerateRefreshToken();
-            SetRefreshToken(newRefreshToken);
+            var user = await _userService.GetUserByIdAsync(storedRefreshToken.UserId);
+            if (user == null)
+            {
+                return Unauthorized("User not found.");
+            }
 
-            return Ok(token);
+            var newToken = CreateToken(user);
+            return Ok(newToken);
         }
 
         private RefreshToken GenerateRefreshToken()
@@ -90,7 +100,8 @@ namespace JWTAuthentication.Controllers
             var refreshToken = new RefreshToken
             { 
                 Token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64)),
-                Expires = DateTime.Now.AddMinutes(5)
+                Expires = DateTime.Now.AddMinutes(3),
+                Created = DateTime.UtcNow
             };
 
             return refreshToken;
@@ -111,13 +122,14 @@ namespace JWTAuthentication.Controllers
             user.TokenExpires = newRefreshToken.Expires;
         }
 
+        //JWT TOKEN
         private string CreateToken(User user)
         {
             List<Claim> claims = new List<Claim>
             {
                 new Claim(ClaimTypes.Name, user.Username),
                 new Claim(ClaimTypes.Role, "Admin"),
-                new Claim(ClaimTypes.NameIdentifier, "CCMSIdent : 4869623")
+                new Claim("user_id", user.Id.ToString())
             };
 
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration.GetSection("AppSettings:Token").Value!));
@@ -126,7 +138,7 @@ namespace JWTAuthentication.Controllers
 
             var token = new JwtSecurityToken(
                     claims: claims,
-                    expires: DateTime.UtcNow.AddMinutes(1),
+                    expires: DateTime.UtcNow.AddMinutes(5),
                     signingCredentials: creds
                 );
 
